@@ -1,5 +1,5 @@
 import { Link, useLocation, Outlet, useNavigate } from "react-router-dom";
-import { Shield, LayoutDashboard, Users, AlertTriangle, FileText, Settings, Search, Bell, LogOut } from "lucide-react";
+import { Shield, LayoutDashboard, Users, AlertTriangle, FileText, BarChart3, Workflow, Settings, Search, Bell, LogOut } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 const menuItems = [
   { label: "Dashboard", icon: LayoutDashboard, path: "/hr/dashboard" },
   { label: "Employees", icon: Users, path: "/hr/employees" },
+  { label: "Performance", icon: BarChart3, path: "/hr/performance" },
+  { label: "Governance Process", icon: Workflow, path: "/hr/governance-process" },
   { label: "Governance Alerts", icon: AlertTriangle, path: "/hr/governance-alerts" },
   { label: "Audit Logs", icon: FileText, path: "/hr/audit-logs" },
 ];

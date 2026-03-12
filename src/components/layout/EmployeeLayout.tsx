@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 
 const menuItems = [
   { label: "Dashboard", icon: LayoutDashboard, path: "/employee/dashboard" },
-  { label: "HR Updates", icon: Bell, path: "/employee/hr-updates" },
   { label: "My Tasks", icon: ClipboardList, path: "/employee/tasks" },
   { label: "Communication", icon: MessageSquare, path: "/employee/communication" },
   { label: "Performance", icon: BarChart3, path: "/employee/performance" },

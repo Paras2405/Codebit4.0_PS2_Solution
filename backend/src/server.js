@@ -36,8 +36,10 @@ const mongoEmployeePerformanceCollection = process.env.MONGODB_EMPLOYEE_PERFORMA
 const mongoHrRequestsCollection = process.env.MONGODB_HR_REQUESTS_COLLECTION || "hr_requests";
 const mongoUsersCollection = process.env.MONGODB_USERS_COLLECTION || "users";
 const mongoComplainsCollection = process.env.MONGODB_COMPLAINS_COLLECTION || "complains";
+const mongoGovernanceCasesCollection = process.env.MONGODB_GOVERNANCE_CASES_COLLECTION || "governance_cases";
 const n8nGenRequestWebhookUrl = process.env.N8N_GENREQ_WEBHOOK_URL || "https://regnify-2.app.n8n.cloud/webhook-test/genreq";
 const n8nSendPassWebhookUrl = process.env.N8N_SENDPASS_WEBHOOK_URL || "https://regnify-2.app.n8n.cloud/webhook-test/sendpass";
+const n8nGenerateReportWebhookUrl = process.env.N8N_GENERATE_REPORT_WEBHOOK_URL || "https://regnify-2.app.n8n.cloud/webhook-test/generate-report";
 const n8nSendPassWebhookSecret = process.env.N8N_SENDPASS_WEBHOOK_SECRET || "";
 const n8nServiceToken = process.env.N8N_SERVICE_TOKEN || "";
 const publicBaseUrl = process.env.PUBLIC_BASE_URL
@@ -521,16 +523,38 @@ const getCertificateWebhookUrls = () => {
   const configuredWebhookUrl = process.env.N8N_CERTIFICATE_WEBHOOK_URL;
   const defaultTestUrl = "https://regnify.app.n8n.cloud/webhook-test/certificate-gen";
   const fallbackProdUrl = "https://regnify.app.n8n.cloud/webhook/certificate-gen";
+  const configuredProdUrl = configuredWebhookUrl?.includes("/webhook-test/")
+    ? configuredWebhookUrl.replace("/webhook-test/", "/webhook/")
+    : configuredWebhookUrl;
 
   if (!configuredWebhookUrl) {
     return [defaultTestUrl, fallbackProdUrl];
   }
 
   if (configuredWebhookUrl.includes("/webhook-test/")) {
-    return [configuredWebhookUrl, fallbackProdUrl];
+    return Array.from(new Set([configuredWebhookUrl, configuredProdUrl, fallbackProdUrl]));
   }
 
-  return [configuredWebhookUrl];
+  return Array.from(new Set([configuredWebhookUrl, fallbackProdUrl]));
+};
+
+const getGenerateReportWebhookUrls = () => {
+  const configuredWebhookUrl = n8nGenerateReportWebhookUrl;
+  const defaultTestUrl = "https://regnify-2.app.n8n.cloud/webhook-test/generate-report";
+  const fallbackProdUrl = "https://regnify-2.app.n8n.cloud/webhook/generate-report";
+  const configuredProdUrl = configuredWebhookUrl?.includes("/webhook-test/")
+    ? configuredWebhookUrl.replace("/webhook-test/", "/webhook/")
+    : configuredWebhookUrl;
+
+  if (!configuredWebhookUrl) {
+    return [defaultTestUrl, fallbackProdUrl];
+  }
+
+  if (configuredWebhookUrl.includes("/webhook-test/")) {
+    return Array.from(new Set([configuredWebhookUrl, configuredProdUrl, fallbackProdUrl]));
+  }
+
+  return Array.from(new Set([configuredWebhookUrl, fallbackProdUrl]));
 };
 
 app.post("/api/generate-certificate", async (req, res) => {
@@ -649,6 +673,183 @@ app.post("/api/hr-ai-generate-request", async (req, res) => {
   } catch (error) {
     return res.status(500).json({
       error: "Unable to trigger AI generation webhook",
+      details: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
+app.post("/api/generate-report", async (req, res) => {
+  const { employeeId } = req.body ?? {};
+  const normalizedEmployeeId = String(employeeId || "").trim();
+
+  if (!normalizedEmployeeId) {
+    return res.status(400).json({ error: "employeeId is required" });
+  }
+
+  try {
+    const employeeObjectId = ObjectId.isValid(normalizedEmployeeId)
+      ? new ObjectId(normalizedEmployeeId)
+      : null;
+
+    const employee = employeeObjectId
+      ? await db.collection(mongoEmployeesCollection).findOne({ _id: employeeObjectId })
+      : null;
+    const employeeEmail = String(employee?.email || "").trim().toLowerCase();
+    const employeeTasks = employeeEmail
+      ? await db.collection(mongoTasksCollection).find({ assigned_to_email: employeeEmail }).toArray()
+      : [];
+    const employeePerformance = employeeEmail
+      ? await db.collection(mongoEmployeePerformanceCollection).findOne({ employee_email: employeeEmail })
+      : null;
+
+    const requestedAt = new Date().toISOString();
+    const basePayload = {
+      employeeId: normalizedEmployeeId,
+      employeeName: String(employee?.full_name || "").trim() || null,
+      employeeEmail: employeeEmail || null,
+      role: String(employee?.role || "").trim() || null,
+      department: String(employee?.department || "").trim() || null,
+      requestedBy: deriveActorFromRequest(req),
+      requestedAt,
+    };
+
+    const webhookUrls = getGenerateReportWebhookUrls();
+    let finalResponse = null;
+    let finalPayload = null;
+    const attemptErrors = [];
+
+    for (const webhookUrl of webhookUrls) {
+      const webhookResponse = await fetch(webhookUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(basePayload),
+      });
+
+      const responseText = await webhookResponse.text();
+      let responsePayload;
+      try {
+        responsePayload = responseText ? JSON.parse(responseText) : { message: "Webhook triggered" };
+      } catch {
+        responsePayload = { message: responseText || "Webhook triggered" };
+      }
+
+      finalResponse = webhookResponse;
+      finalPayload = responsePayload;
+
+      if (!webhookResponse.ok) {
+        attemptErrors.push({
+          status: webhookResponse.status,
+          webhookUrl,
+          details: responsePayload,
+        });
+      }
+
+      if (webhookResponse.status === 404 && webhookUrl.includes("/webhook-test/")) {
+        continue;
+      }
+
+      break;
+    }
+
+    const n8nSucceeded = Boolean(finalResponse?.ok);
+
+    if (!n8nSucceeded) {
+      const assignedTasks = employeeTasks.length;
+      const completedTasks = employeeTasks.filter((task) => isTaskCompleted(task)).length;
+      const pendingTasks = Math.max(0, assignedTasks - completedTasks);
+      const completionPercent = assignedTasks > 0
+        ? Math.round((completedTasks / assignedTasks) * 100)
+        : 0;
+      const riskLevel = completionPercent >= 80 ? "Low" : completionPercent >= 50 ? "Medium" : "High";
+
+      const localReport = {
+        event_type: "manager_report",
+        generation_source: "local_fallback",
+        status: "generated",
+        employee_id: normalizedEmployeeId,
+        employee_email: basePayload.employeeEmail,
+        employee_name: basePayload.employeeName,
+        role: basePayload.role,
+        department: basePayload.department,
+        requested_by: basePayload.requestedBy,
+        requested_at: requestedAt,
+        created_at: requestedAt,
+        summary: {
+          assigned_tasks: assignedTasks,
+          completed_tasks: completedTasks,
+          pending_tasks: pendingTasks,
+          completion_percent: completionPercent,
+          manager_rating: Number(employeePerformance?.manager_rating ?? 0),
+          attendance_percent: Number(employeePerformance?.attendance_percent ?? 0),
+          escalation_count: Number(employeePerformance?.escalation_count ?? 0),
+          warning_count: Number(employeePerformance?.warning_count ?? 0),
+          risk_level: riskLevel,
+        },
+        n8n_attempts: attemptErrors,
+      };
+
+      const insertResult = await db.collection(mongoDocumentAuditCollection).insertOne(localReport);
+      const reportId = insertResult.insertedId.toString();
+
+      await logAudit({
+        actor: deriveActorFromRequest(req),
+        action: "Manager Report Generated",
+        entity: "Employee",
+        entityId: normalizedEmployeeId,
+        metadata: {
+          source: "api/generate-report:local-fallback",
+          report_id: reportId,
+        },
+      });
+
+      return res.status(200).json({
+        message: "Manager report generated locally",
+        fallback: true,
+        report: {
+          id: reportId,
+          ...localReport,
+        },
+      });
+    }
+
+    await logAudit({
+      actor: deriveActorFromRequest(req),
+      action: "Manager Report Generated",
+      entity: "Employee",
+      entityId: normalizedEmployeeId,
+      metadata: {
+        source: "api/generate-report:n8n",
+      },
+    });
+
+    const generatedAt = new Date().toISOString();
+    await db.collection(mongoDocumentAuditCollection).insertOne({
+      event_type: "manager_report",
+      generation_source: "n8n",
+      status: "generated",
+      employee_id: normalizedEmployeeId,
+      employee_email: basePayload.employeeEmail,
+      employee_name: basePayload.employeeName,
+      role: basePayload.role,
+      department: basePayload.department,
+      requested_by: basePayload.requestedBy,
+      requested_at: requestedAt,
+      created_at: generatedAt,
+      n8n_payload: finalPayload,
+      report_content: typeof finalPayload?.report === "string"
+        ? finalPayload.report
+        : (typeof finalPayload?.message === "string" ? finalPayload.message : JSON.stringify(finalPayload || {})),
+    });
+
+    return res.status(200).json({
+      message: "Report generation started",
+      data: finalPayload,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: "Unable to trigger report generation webhook",
       details: error instanceof Error ? error.message : "Unknown error",
     });
   }
@@ -864,6 +1065,8 @@ app.post("/api/generate-certificate/download", async (req, res) => {
     return res.status(400).json({ error: "name, email and company are required" });
   }
 
+  let lastWebhookError = null;
+
   try {
     const payload = { name, email, company };
     const webhookUrls = getCertificateWebhookUrls();
@@ -892,28 +1095,35 @@ app.post("/api/generate-certificate/download", async (req, res) => {
           details = responseText || null;
         }
 
-        return res.status(502).json({
+        lastWebhookError = {
           error: "Certificate generation webhook failed",
           details,
-        });
+          status: response.status,
+          webhookUrl,
+        };
+        continue;
       }
 
-      const contentType = response.headers.get("content-type") || "application/octet-stream";
+      const contentTypeHeader = response.headers.get("content-type") || "application/octet-stream";
+      const contentDispositionHeader = response.headers.get("content-disposition");
+      const certificateBinary = Buffer.from(await response.arrayBuffer());
 
-      // If workflow responded with JSON, surface it instead of forcing file download.
-      if (contentType.includes("application/json")) {
-        const payloadData = await response.json().catch(() => null);
-        return res.status(502).json({
-          error: "Webhook returned JSON instead of certificate binary",
-          details: payloadData,
-        });
+      if (certificateBinary.length === 0) {
+        lastWebhookError = {
+          error: "Webhook returned empty certificate payload",
+          details: null,
+          status: response.status,
+          webhookUrl,
+        };
+        continue;
       }
 
       const contentDisposition =
-        response.headers.get("content-disposition") ||
+        contentDispositionHeader ||
         `attachment; filename="${String(email).split("@")[0] || "certificate"}.p12"`;
-
-      const certificateBinary = Buffer.from(await response.arrayBuffer());
+      const contentType = contentTypeHeader.includes("application/json")
+        ? "application/x-pkcs12"
+        : contentTypeHeader;
 
       await logAudit({
         actor: deriveActorFromRequest(req),
@@ -933,7 +1143,7 @@ app.post("/api/generate-certificate/download", async (req, res) => {
       return res.status(200).send(certificateBinary);
     }
 
-    return res.status(502).json({ error: "No webhook response received" });
+    return res.status(502).json(lastWebhookError || { error: "No webhook response received" });
   } catch (error) {
     return res.status(500).json({
       error: "Unable to download digital certificate",
@@ -2836,6 +3046,747 @@ app.get("/api/ml/risk-prediction/:employeeEmail", async (req, res) => {
   } catch (serverError) {
     console.error("[MLRiskPrediction] Mongo read error:", serverError);
     return res.status(500).json({ error: "Unable to fetch risk prediction" });
+  }
+});
+
+app.get("/api/ml/succession-ranking", async (req, res) => {
+  const requestedThreshold = Number(req.query.threshold);
+  const threshold = Number.isFinite(requestedThreshold)
+    ? Math.max(0, Math.min(100, requestedThreshold))
+    : 50;
+
+  try {
+    const employees = await db
+      .collection(mongoEmployeesCollection)
+      .find({}, { sort: { full_name: 1 } })
+      .toArray();
+
+    const normalizedEmails = employees
+      .map((employee) => String(employee?.email || "").trim().toLowerCase())
+      .filter(Boolean);
+
+    const performanceRecords = normalizedEmails.length > 0
+      ? await db
+          .collection(mongoEmployeePerformanceCollection)
+          .find({ employee_email: { $in: normalizedEmails } })
+          .toArray()
+      : [];
+
+    const performanceByEmail = new Map(
+      performanceRecords.map((record) => [String(record?.employee_email || "").trim().toLowerCase(), record]),
+    );
+
+    const evaluatedResults = await Promise.all(
+      employees.map(async (employee) => {
+        const employeeId = employee?._id?.toString?.() || null;
+        const employeeEmail = String(employee?.email || "").trim().toLowerCase();
+        const performanceRecord = performanceByEmail.get(employeeEmail);
+
+        const successionPayload = {
+          completion_ratio: Number(performanceRecord?.completion_ratio ?? 0),
+          task_consistency: Number(performanceRecord?.task_consistency ?? 0),
+          attendance_percent: Number(performanceRecord?.attendance_percent ?? 0),
+          avg_delay_days: Number(performanceRecord?.avg_delay_days ?? 0),
+          manager_rating: Number(performanceRecord?.manager_rating ?? 0),
+          performance_trend: Number(performanceRecord?.performance_trend ?? 0),
+          escalation_count: Number(performanceRecord?.escalation_count ?? 0),
+          warning_count: Number(performanceRecord?.warning_count ?? 0),
+        };
+
+        try {
+          const mlResponse = await fetch(`${mlApiBaseUrl}/evaluate_employee`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(successionPayload),
+            signal: AbortSignal.timeout(15000),
+          });
+
+          const mlResponseText = await mlResponse.text();
+          let mlPayload;
+          try {
+            mlPayload = mlResponseText ? JSON.parse(mlResponseText) : null;
+          } catch {
+            mlPayload = { message: mlResponseText || "Invalid ML response" };
+          }
+
+          if (!mlResponse.ok) {
+            return {
+              employee_id: employeeId,
+              employee_name: String(employee?.full_name || "").trim() || "Unnamed Employee",
+              employee_email: employeeEmail || null,
+              role: String(employee?.role || "").trim() || null,
+              department: String(employee?.department || "").trim() || null,
+              metrics: successionPayload,
+              ml_error: `ML service returned ${mlResponse.status}`,
+              details: mlPayload,
+              qualified: false,
+              succession_score: 0,
+              explanation: [],
+            };
+          }
+
+          const performanceScore = Number(mlPayload?.performance_score ?? 0);
+          const potentialScore = Number(mlPayload?.potential_score ?? 0);
+          const successionScore = Number(((performanceScore + potentialScore) / 2).toFixed(2));
+          const qualified = successionScore >= threshold;
+
+          return {
+            employee_id: employeeId,
+            employee_name: String(employee?.full_name || "").trim() || "Unnamed Employee",
+            employee_email: employeeEmail || null,
+            role: String(employee?.role || "").trim() || null,
+            department: String(employee?.department || "").trim() || null,
+            metrics: successionPayload,
+            performance_score: performanceScore,
+            potential_score: potentialScore,
+            succession_score: successionScore,
+            talent_category: String(mlPayload?.talent_category || "").trim() || "Uncategorized",
+            explanation: Array.isArray(mlPayload?.explanation)
+              ? mlPayload.explanation
+              : [String(mlPayload?.explanation || "").trim()].filter(Boolean),
+            qualified,
+          };
+        } catch (mlCallError) {
+          return {
+            employee_id: employeeId,
+            employee_name: String(employee?.full_name || "").trim() || "Unnamed Employee",
+            employee_email: employeeEmail || null,
+            role: String(employee?.role || "").trim() || null,
+            department: String(employee?.department || "").trim() || null,
+            metrics: successionPayload,
+            ml_error: mlCallError instanceof Error ? mlCallError.message : "ML service unavailable",
+            qualified: false,
+            succession_score: 0,
+            explanation: [],
+          };
+        }
+      }),
+    );
+
+    const rankedCandidates = evaluatedResults
+      .filter((result) => result.qualified)
+      .sort((a, b) => Number(b.succession_score || 0) - Number(a.succession_score || 0))
+      .map((result, index) => ({
+        ...result,
+        rank: index + 1,
+      }));
+
+    return res.status(200).json({
+      threshold,
+      evaluated_count: evaluatedResults.length,
+      qualified_count: rankedCandidates.length,
+      ranked_candidates: rankedCandidates,
+      all_results: evaluatedResults,
+    });
+  } catch (serverError) {
+    console.error("[SuccessionRanking] Error:", serverError);
+    return res.status(500).json({ error: "Unable to compute succession ranking" });
+  }
+});
+
+const buildGovernanceEmployeeData = (performanceRecord = {}) => ({
+  completion_ratio: Number(performanceRecord?.completion_ratio ?? 0),
+  avg_delay_days: Number(performanceRecord?.avg_delay_days ?? 0),
+  attendance_percent: Number(performanceRecord?.attendance_percent ?? 0),
+  escalation_count: Number(performanceRecord?.escalation_count ?? 0),
+  warning_count: Number(performanceRecord?.warning_count ?? 0),
+  manager_rating: Number(performanceRecord?.manager_rating ?? 0),
+  performance_trend: Number(performanceRecord?.performance_trend ?? 0),
+  task_consistency: Number(performanceRecord?.task_consistency ?? 0),
+});
+
+const deriveAiRiskLevelForGovernance = (employeeData = {}) => {
+  const attendance = Number(employeeData.attendance_percent ?? 0);
+  const delay = Number(employeeData.avg_delay_days ?? 0);
+  const escalations = Number(employeeData.escalation_count ?? 0);
+  const warnings = Number(employeeData.warning_count ?? 0);
+  const completion = Number(employeeData.completion_ratio ?? 0);
+
+  if (attendance < 70 || delay > 6 || escalations >= 3 || warnings >= 2 || completion < 0.45) {
+    return "HIGH";
+  }
+
+  if (attendance < 85 || delay > 2 || escalations >= 1 || warnings >= 1 || completion < 0.7) {
+    return "MEDIUM";
+  }
+
+  return "LOW";
+};
+
+const callGovernanceService = async (path, payload) => {
+  const response = await fetch(`${mlApiBaseUrl}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(20000),
+  });
+
+  const text = await response.text();
+  let parsed;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    parsed = { message: text || "Invalid governance service response" };
+  }
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    body: parsed,
+  };
+};
+
+const fetchLatestManagerReport = async (employeeId) => {
+  if (!employeeId) {
+    return null;
+  }
+
+  const report = await db.collection(mongoDocumentAuditCollection).findOne(
+    {
+      event_type: { $in: ["manager_report", "manager_report_generation_fallback"] },
+      employee_id: String(employeeId),
+    },
+    { sort: { created_at: -1 } },
+  );
+
+  if (!report) {
+    return null;
+  }
+
+  return {
+    id: report._id?.toString?.() || null,
+    event_type: report.event_type,
+    generation_source: report.generation_source || null,
+    created_at: report.created_at || report.requested_at || null,
+    summary: report.summary || null,
+    report_content: report.report_content || report.justification_text || null,
+    n8n_payload: report.n8n_payload || null,
+  };
+};
+
+app.get("/api/governance/employee/:employeeId/context", async (req, res) => {
+  const employeeId = String(req.params.employeeId || "").trim();
+  if (!employeeId || !ObjectId.isValid(employeeId)) {
+    return res.status(400).json({ error: "employeeId is required and must be valid" });
+  }
+
+  try {
+    const employee = await db.collection(mongoEmployeesCollection).findOne({ _id: new ObjectId(employeeId) });
+    if (!employee) {
+      return res.status(404).json({ error: "Employee not found" });
+    }
+
+    const employeeEmail = String(employee.email || "").trim().toLowerCase();
+    const performanceRecord = await db.collection(mongoEmployeePerformanceCollection).findOne({ employee_email: employeeEmail });
+    const employeeData = buildGovernanceEmployeeData(performanceRecord);
+    const aiRiskLevel = deriveAiRiskLevelForGovernance(employeeData);
+    const latestReport = await fetchLatestManagerReport(employeeId);
+    const governanceCase = await db.collection(mongoGovernanceCasesCollection).findOne(
+      { employee_id: employeeId },
+      { sort: { updated_at: -1 } },
+    );
+
+    return res.status(200).json({
+      employee: {
+        id: employee._id.toString(),
+        full_name: employee.full_name || "",
+        email: employeeEmail,
+        department: employee.department || "",
+        role: employee.role || "",
+      },
+      employee_data: employeeData,
+      ai_risk_level: aiRiskLevel,
+      latest_report: latestReport,
+      governance_case: governanceCase
+        ? {
+            id: governanceCase._id?.toString?.() || null,
+            ...governanceCase,
+          }
+        : null,
+    });
+  } catch (serverError) {
+    console.error("[GovernanceContext] Error:", serverError);
+    return res.status(500).json({ error: "Unable to fetch governance context" });
+  }
+});
+
+app.post("/api/governance/manager-feedback", async (req, res) => {
+  const { employeeId, ai_risk_level, manager_decision, manager_comment, confidence_score } = req.body ?? {};
+  const employeeIdNormalized = String(employeeId || "").trim();
+
+  if (!employeeIdNormalized || !ObjectId.isValid(employeeIdNormalized)) {
+    return res.status(400).json({ error: "employeeId is required and must be valid" });
+  }
+
+  if (!ai_risk_level || !manager_decision) {
+    return res.status(400).json({ error: "ai_risk_level and manager_decision are required" });
+  }
+
+  try {
+    const employee = await db.collection(mongoEmployeesCollection).findOne({ _id: new ObjectId(employeeIdNormalized) });
+    const latestReport = await fetchLatestManagerReport(employeeIdNormalized);
+
+    const governanceResponse = await callGovernanceService("/governance/manager-feedback", {
+      ai_risk_level,
+      manager_decision,
+      manager_comment: String(manager_comment || "").trim(),
+      confidence_score: Number(confidence_score ?? 0.5),
+    });
+
+    if (!governanceResponse.ok) {
+      return res.status(502).json({
+        error: "Manager governance service failed",
+        details: governanceResponse.body,
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+
+    await db.collection(mongoGovernanceCasesCollection).updateOne(
+      { employee_id: employeeIdNormalized },
+      {
+        $set: {
+          employee_id: employeeIdNormalized,
+          employee_name: String(employee?.full_name || "").trim() || null,
+          employee_email: String(employee?.email || "").trim().toLowerCase() || null,
+          latest_report: latestReport,
+          manager_feedback: {
+            ai_risk_level,
+            manager_decision,
+            manager_comment: String(manager_comment || "").trim(),
+            confidence_score: Number(confidence_score ?? 0.5),
+            submitted_at: nowIso,
+          },
+          manager_feedback_result: governanceResponse.body,
+          governance_status: governanceResponse.body?.next_step || "JUSTIFICATION_REQUIRED",
+          updated_at: nowIso,
+        },
+        $setOnInsert: {
+          created_at: nowIso,
+        },
+      },
+      { upsert: true },
+    );
+
+    return res.status(200).json({
+      message: governanceResponse.body?.conflict_detected
+        ? "Conflict detected. Manager justification is required."
+        : "Manager feedback aligned with AI. Sent to HR review.",
+      result: governanceResponse.body,
+    });
+  } catch (serverError) {
+    console.error("[ManagerFeedback] Error:", serverError);
+    return res.status(500).json({ error: "Unable to process manager feedback" });
+  }
+});
+
+app.post("/api/governance/submit-justification", async (req, res) => {
+  const { employeeId, ai_risk_level, manager_decision, justification_text, attachments } = req.body ?? {};
+  const employeeIdNormalized = String(employeeId || "").trim();
+
+  if (!employeeIdNormalized || !ObjectId.isValid(employeeIdNormalized)) {
+    return res.status(400).json({ error: "employeeId is required and must be valid" });
+  }
+
+  if (!ai_risk_level || !manager_decision || !justification_text) {
+    return res.status(400).json({ error: "ai_risk_level, manager_decision and justification_text are required" });
+  }
+
+  const normalizedAttachments = Array.isArray(attachments)
+    ? attachments.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+
+  try {
+    const governanceResponse = await callGovernanceService("/governance/submit-justification", {
+      ai_risk_level,
+      manager_decision,
+      justification_text,
+      attachments: normalizedAttachments,
+    });
+
+    if (!governanceResponse.ok) {
+      return res.status(502).json({
+        error: "Justification validation service failed",
+        details: governanceResponse.body,
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+    await db.collection(mongoGovernanceCasesCollection).updateOne(
+      { employee_id: employeeIdNormalized },
+      {
+        $set: {
+          employee_id: employeeIdNormalized,
+          manager_justification: {
+            justification_text,
+            attachments: normalizedAttachments,
+            submitted_at: nowIso,
+          },
+          manager_result: governanceResponse.body,
+          governance_status: governanceResponse.body?.next_step || "HOLD",
+          updated_at: nowIso,
+        },
+      },
+      { upsert: true },
+    );
+
+    const needsRetry = !Boolean(governanceResponse.body?.justification_valid);
+
+    return res.status(200).json({
+      message: needsRetry
+        ? "Justification not sufficient. Please provide more specific evidence-based details."
+        : "Justification validated. Proceed to HR review.",
+      result: governanceResponse.body,
+      requires_retry: needsRetry,
+    });
+  } catch (serverError) {
+    console.error("[SubmitJustification] Error:", serverError);
+    return res.status(500).json({ error: "Unable to validate justification" });
+  }
+});
+
+app.post("/api/governance/hr-review", async (req, res) => {
+  const employeeId = String(req.body?.employeeId || "").trim();
+  if (!employeeId || !ObjectId.isValid(employeeId)) {
+    return res.status(400).json({ error: "employeeId is required and must be valid" });
+  }
+
+  try {
+    const employee = await db.collection(mongoEmployeesCollection).findOne({ _id: new ObjectId(employeeId) });
+    if (!employee) {
+      return res.status(404).json({ error: "Employee not found" });
+    }
+
+    const employeeEmail = String(employee.email || "").trim().toLowerCase();
+    const performanceRecord = await db.collection(mongoEmployeePerformanceCollection).findOne({ employee_email: employeeEmail });
+    const employeeData = buildGovernanceEmployeeData(performanceRecord);
+    const latestReport = await fetchLatestManagerReport(employeeId);
+
+    const governanceCase = await db.collection(mongoGovernanceCasesCollection).findOne(
+      { employee_id: employeeId },
+      { sort: { updated_at: -1 } },
+    );
+
+    const aiRiskLevel = String(
+      governanceCase?.manager_result?.ai_risk_level ||
+      governanceCase?.manager_feedback?.ai_risk_level ||
+      deriveAiRiskLevelForGovernance(employeeData),
+    ).toUpperCase();
+
+    const managerResult = governanceCase?.manager_result || governanceCase?.manager_feedback_result || {
+      manager_decision: governanceCase?.manager_feedback?.manager_decision || "ACCEPT",
+    };
+
+    const managerConflict = Boolean(
+      governanceCase?.manager_result?.conflict_detected ||
+      governanceCase?.manager_feedback_result?.conflict_detected ||
+      false,
+    );
+
+    const hrResponse = await callGovernanceService("/governance/hr-review", {
+      employee_data: employeeData,
+      ai_risk_level: aiRiskLevel,
+      manager_conflict: managerConflict,
+      manager_result: managerResult,
+    });
+
+    if (!hrResponse.ok) {
+      return res.status(502).json({
+        error: "HR governance service failed",
+        details: hrResponse.body,
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+    await db.collection(mongoGovernanceCasesCollection).updateOne(
+      { employee_id: employeeId },
+      {
+        $set: {
+          employee_id: employeeId,
+          employee_email: employeeEmail,
+          employee_name: String(employee.full_name || "").trim(),
+          employee_data: employeeData,
+          ai_analysis: hrResponse.body?.ai_analysis || { risk_level: aiRiskLevel },
+          manager_review: hrResponse.body?.manager_review || managerResult,
+          hr_review: hrResponse.body?.hr_review || null,
+          latest_report: latestReport,
+          governance_status: hrResponse.body?.hr_review?.next_step || "SITE_HEAD_REVIEW",
+          updated_at: nowIso,
+        },
+        $setOnInsert: {
+          created_at: nowIso,
+        },
+      },
+      { upsert: true },
+    );
+
+    return res.status(200).json({
+      message: "HR governance review completed",
+      result: hrResponse.body,
+    });
+  } catch (serverError) {
+    console.error("[HrGovernanceReview] Error:", serverError);
+    return res.status(500).json({ error: "Unable to complete HR governance review" });
+  }
+});
+
+app.get("/api/governance/sitehead/cases", async (_req, res) => {
+  try {
+    const cases = await db
+      .collection(mongoGovernanceCasesCollection)
+      .find({}, { sort: { updated_at: -1 } })
+      .toArray();
+
+    const mappedCases = await Promise.all(cases.map(async (item) => {
+      const latestReport = await fetchLatestManagerReport(item.employee_id);
+      return {
+        id: item._id?.toString?.() || item.id,
+        employee_id: item.employee_id,
+        employee_name: item.employee_name || "Unnamed Employee",
+        employee_email: item.employee_email || null,
+        employee_data: item.employee_data || null,
+        ai_analysis: item.ai_analysis || null,
+        manager_review: item.manager_review || item.manager_result || null,
+        hr_review: item.hr_review || null,
+        site_head_review: item.site_head_review || null,
+        hr_second_review: item.hr_second_review || null,
+        governance_status: item.governance_status || "PENDING",
+        latest_report: latestReport,
+        updated_at: item.updated_at || null,
+      };
+    }));
+
+    return res.status(200).json({ cases: mappedCases });
+  } catch (serverError) {
+    console.error("[SiteHeadCases] Error:", serverError);
+    return res.status(500).json({ error: "Unable to fetch governance cases" });
+  }
+});
+
+app.get("/api/governance/hr/cases", async (req, res) => {
+  const statusFilter = String(req.query.status || "").trim().toUpperCase();
+
+  try {
+    const query = statusFilter ? { governance_status: statusFilter } : {};
+
+    const cases = await db
+      .collection(mongoGovernanceCasesCollection)
+      .find(query, { sort: { updated_at: -1 } })
+      .toArray();
+
+    const mappedCases = await Promise.all(cases.map(async (item) => {
+      const latestReport = await fetchLatestManagerReport(item.employee_id);
+      return {
+        id: item._id?.toString?.() || item.id,
+        employee_id: item.employee_id,
+        employee_name: item.employee_name || "Unnamed Employee",
+        employee_email: item.employee_email || null,
+        ai_analysis: item.ai_analysis || null,
+        manager_review: item.manager_review || item.manager_result || null,
+        hr_review: item.hr_review || null,
+        site_head_review: item.site_head_review || null,
+        hr_second_review: item.hr_second_review || null,
+        governance_status: item.governance_status || "PENDING",
+        latest_report: latestReport,
+        updated_at: item.updated_at || null,
+      };
+    }));
+
+    return res.status(200).json({ cases: mappedCases });
+  } catch (serverError) {
+    console.error("[HrGovernanceCases] Error:", serverError);
+    return res.status(500).json({ error: "Unable to fetch HR governance cases" });
+  }
+});
+
+app.get("/api/governance/hr/stats", async (_req, res) => {
+  try {
+    const cases = await db.collection(mongoGovernanceCasesCollection).find({}).toArray();
+    const awaitingHr = cases.filter((item) => String(item.governance_status || "") === "SITE_HEAD_REVIEW").length;
+    const escalatedToHr = cases.filter((item) => String(item.governance_status || "") === "HR_RE_REVIEW").length;
+    const secondReviewDone = cases.filter((item) => String(item.governance_status || "") === "HR_SECOND_REVIEW_COMPLETED").length;
+
+    return res.status(200).json({
+      total_cases: cases.length,
+      awaiting_hr: awaitingHr,
+      escalated_to_hr: escalatedToHr,
+      hr_second_review_completed: secondReviewDone,
+    });
+  } catch (serverError) {
+    console.error("[HrGovernanceStats] Error:", serverError);
+    return res.status(500).json({ error: "Unable to fetch HR governance stats" });
+  }
+});
+
+app.get("/api/governance/sitehead/case/:employeeId", async (req, res) => {
+  const employeeId = String(req.params.employeeId || "").trim();
+  if (!employeeId) {
+    return res.status(400).json({ error: "employeeId is required" });
+  }
+
+  try {
+    const governanceCase = await db.collection(mongoGovernanceCasesCollection).findOne(
+      { employee_id: employeeId },
+      { sort: { updated_at: -1 } },
+    );
+
+    if (!governanceCase) {
+      return res.status(404).json({ error: "Governance case not found" });
+    }
+
+    const latestReport = await fetchLatestManagerReport(employeeId);
+
+    return res.status(200).json({
+      case: {
+        id: governanceCase._id?.toString?.() || governanceCase.id,
+        ...governanceCase,
+        latest_report: latestReport,
+      },
+    });
+  } catch (serverError) {
+    console.error("[SiteHeadCaseByEmployee] Error:", serverError);
+    return res.status(500).json({ error: "Unable to fetch governance case" });
+  }
+});
+
+app.get("/api/governance/sitehead/stats", async (_req, res) => {
+  try {
+    const cases = await db.collection(mongoGovernanceCasesCollection).find({}).toArray();
+    const pending = cases.filter((item) => !item.site_head_review).length;
+    const resolved = cases.filter((item) => item.site_head_review && !item.site_head_review.conflict_detected).length;
+    const escalated = cases.filter((item) => item.site_head_review?.conflict_detected).length;
+    const highRisk = cases.filter((item) => String(item.ai_analysis?.risk_level || "").toUpperCase() === "HIGH").length;
+    const avgGovernanceScore = cases.length > 0
+      ? Number((cases.reduce((sum, item) => sum + Number(item.hr_review?.governance_risk_score || 0), 0) / cases.length).toFixed(2))
+      : 0;
+
+    return res.status(200).json({
+      total_cases: cases.length,
+      pending_cases: pending,
+      resolved_cases: resolved,
+      escalated_cases: escalated,
+      high_risk_cases: highRisk,
+      avg_governance_score: avgGovernanceScore,
+    });
+  } catch (serverError) {
+    console.error("[SiteHeadGovernanceStats] Error:", serverError);
+    return res.status(500).json({ error: "Unable to fetch governance stats" });
+  }
+});
+
+app.post("/api/governance/sitehead/decision", async (req, res) => {
+  const employeeId = String(req.body?.employeeId || "").trim();
+  const siteHeadDecision = String(req.body?.site_head_decision || "").trim().toUpperCase();
+
+  if (!employeeId) {
+    return res.status(400).json({ error: "employeeId is required" });
+  }
+
+  if (!siteHeadDecision) {
+    return res.status(400).json({ error: "site_head_decision is required" });
+  }
+
+  try {
+    const governanceCase = await db.collection(mongoGovernanceCasesCollection).findOne(
+      { employee_id: employeeId },
+      { sort: { updated_at: -1 } },
+    );
+
+    if (!governanceCase || !governanceCase.hr_review) {
+      return res.status(400).json({ error: "HR review is required before site head decision" });
+    }
+
+    const siteHeadResponse = await callGovernanceService("/governance/sitehead-review", {
+      ai_analysis: governanceCase.ai_analysis,
+      manager_review: governanceCase.manager_review,
+      hr_review: governanceCase.hr_review,
+      site_head_decision: siteHeadDecision,
+    });
+
+    if (!siteHeadResponse.ok) {
+      return res.status(502).json({
+        error: "Site head governance service failed",
+        details: siteHeadResponse.body,
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+    const nextStep = String(siteHeadResponse.body?.site_head_review?.next_step || "TRIGGER_DOCUMENTATION").toUpperCase();
+
+    await db.collection(mongoGovernanceCasesCollection).updateOne(
+      { employee_id: employeeId },
+      {
+        $set: {
+          site_head_review: siteHeadResponse.body?.site_head_review || null,
+          governance_status: nextStep,
+          updated_at: nowIso,
+        },
+      },
+    );
+
+    return res.status(200).json({
+      message: nextStep === "HR_RE_REVIEW"
+        ? "Conflict detected with HR recommendation. Case escalated to HR second review."
+        : "Site head decision recorded successfully.",
+      result: siteHeadResponse.body,
+    });
+  } catch (serverError) {
+    console.error("[SiteHeadDecision] Error:", serverError);
+    return res.status(500).json({ error: "Unable to record site head decision" });
+  }
+});
+
+app.post("/api/governance/hr/second-review", async (req, res) => {
+  const employeeId = String(req.body?.employeeId || "").trim();
+  const hrDecision = String(req.body?.hr_decision || "").trim().toUpperCase();
+  const hrComment = String(req.body?.hr_comment || "").trim();
+
+  if (!employeeId) {
+    return res.status(400).json({ error: "employeeId is required" });
+  }
+
+  if (!hrDecision) {
+    return res.status(400).json({ error: "hr_decision is required" });
+  }
+
+  try {
+    const governanceCase = await db.collection(mongoGovernanceCasesCollection).findOne(
+      { employee_id: employeeId },
+      { sort: { updated_at: -1 } },
+    );
+
+    if (!governanceCase) {
+      return res.status(404).json({ error: "Governance case not found" });
+    }
+
+    const nowIso = new Date().toISOString();
+
+    await db.collection(mongoGovernanceCasesCollection).updateOne(
+      { employee_id: employeeId },
+      {
+        $set: {
+          hr_second_review: {
+            hr_decision: hrDecision,
+            hr_comment: hrComment,
+            reviewed_at: nowIso,
+          },
+          governance_status: "HR_SECOND_REVIEW_COMPLETED",
+          updated_at: nowIso,
+        },
+      },
+    );
+
+    return res.status(200).json({
+      message: "HR second review recorded",
+      hr_second_review: {
+        hr_decision: hrDecision,
+        hr_comment: hrComment,
+        reviewed_at: nowIso,
+      },
+    });
+  } catch (serverError) {
+    console.error("[HrSecondReview] Error:", serverError);
+    return res.status(500).json({ error: "Unable to save HR second review" });
   }
 });
 

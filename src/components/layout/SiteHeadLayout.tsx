@@ -1,5 +1,5 @@
 import { Link, useLocation, Outlet, useNavigate } from "react-router-dom";
-import { Shield, LayoutDashboard, ClipboardCheck, Users, BarChart3, History, Lightbulb, FileText, Settings, Search, Bell, LogOut } from "lucide-react";
+import { Shield, LayoutDashboard, ClipboardCheck, Users, BarChart3, Lightbulb, FileText, Search, Bell, LogOut } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -9,7 +9,6 @@ const menuItems = [
   { label: "Pending Decisions", icon: ClipboardCheck, path: "/site-head/pending" },
   { label: "Employee Reviews", icon: Users, path: "/site-head/pending" },
   { label: "Performance Analytics", icon: BarChart3, path: "/site-head/analytics" },
-  { label: "Approval History", icon: History, path: "/site-head/history" },
 ];
 
 const intelligenceItems = [
@@ -68,16 +67,6 @@ const SiteHeadLayout = () => {
               {item.label}
             </Link>
           ))}
-          <div className="mt-6">
-            <p className="px-3 mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">System</p>
-            <Link
-              to="/site-head/dashboard"
-              className="flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:bg-accent/50 hover:text-foreground"
-            >
-              <Settings className="h-4 w-4" />
-              Settings
-            </Link>
-          </div>
         </nav>
         <div className="border-t border-border p-4">
           <div className="flex items-center gap-3">

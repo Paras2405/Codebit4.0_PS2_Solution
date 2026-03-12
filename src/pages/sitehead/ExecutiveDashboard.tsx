@@ -1,134 +1,164 @@
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Progress } from "@/components/ui/progress";
-import { siteHeadKPIs, departmentPerformance, riskHeatmap, approvalTrend } from "@/data/siteHeadMockData";
-import { useAuth } from "@/contexts/AuthContext";
-import { Download, Calendar, AlertTriangle } from "lucide-react";
-import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, AreaChart, Area } from "recharts";
+import { useEffect, useMemo, useState } from "react";
+import { API_BASE_URL } from "@/lib/api";
+import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, PieChart, Pie, Cell } from "recharts";
+
+type GovernanceCase = {
+  employee_id?: string;
+  employee_name?: string;
+  ai_analysis?: { risk_level?: string } | null;
+  hr_review?: { governance_risk_score?: number; hr_recommendation?: string } | null;
+  governance_status?: string;
+  employee_data?: { department?: string } | null;
+};
+
+type StatsPayload = {
+  total_cases?: number;
+  pending_cases?: number;
+  resolved_cases?: number;
+  escalated_cases?: number;
+  high_risk_cases?: number;
+  avg_governance_score?: number;
+};
+
+const PIE_COLORS = ["#16a34a", "#f59e0b", "#dc2626"];
 
 const ExecutiveDashboard = () => {
-  const { user } = useAuth();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [cases, setCases] = useState<GovernanceCase[]>([]);
+  const [stats, setStats] = useState<StatsPayload | null>(null);
 
-  const riskColor = (level: number) => level > 70 ? "bg-destructive" : level > 50 ? "bg-amber-500" : level > 30 ? "bg-primary" : "bg-green-500";
-  const riskLabel = (label: string) => label === "Elevated" ? "text-destructive" : label === "Watch" ? "text-amber-600" : "text-muted-foreground";
+  useEffect(() => {
+    const load = async () => {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const [casesResponse, statsResponse] = await Promise.all([
+          fetch(`${API_BASE_URL}/api/governance/sitehead/cases`),
+          fetch(`${API_BASE_URL}/api/governance/sitehead/stats`),
+        ]);
+
+        const casesPayload = await casesResponse.json().catch(() => ({}));
+        const statsPayload = await statsResponse.json().catch(() => ({}));
+
+        if (!casesResponse.ok) {
+          throw new Error(casesPayload?.error || `Unable to load governance cases. Status ${casesResponse.status}`);
+        }
+        if (!statsResponse.ok) {
+          throw new Error(statsPayload?.error || `Unable to load governance stats. Status ${statsResponse.status}`);
+        }
+
+        setCases(Array.isArray(casesPayload?.cases) ? casesPayload.cases : []);
+        setStats(statsPayload || null);
+      } catch (loadError) {
+        setError(loadError instanceof Error ? loadError.message : "Unable to load site head dashboard");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    void load();
+  }, []);
+
+  const recommendationChart = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const item of cases) {
+      const key = String(item?.hr_review?.hr_recommendation || "UNSET").toUpperCase();
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return Array.from(counts.entries()).map(([name, value]) => ({ name, value }));
+  }, [cases]);
+
+  const riskDistribution = useMemo(() => {
+    const buckets = { LOW: 0, MEDIUM: 0, HIGH: 0 };
+    for (const item of cases) {
+      const risk = String(item?.ai_analysis?.risk_level || "").toUpperCase();
+      if (risk === "LOW" || risk === "MEDIUM" || risk === "HIGH") {
+        buckets[risk] += 1;
+      }
+    }
+    return [
+      { name: "LOW", value: buckets.LOW },
+      { name: "MEDIUM", value: buckets.MEDIUM },
+      { name: "HIGH", value: buckets.HIGH },
+    ];
+  }, [cases]);
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-foreground">Welcome, Site Head</h1>
-          <div className="flex items-center gap-3 mt-1">
-            <span className="text-sm text-muted-foreground">Site Performance Index:</span>
-            <Badge variant="outline" className="border-primary text-primary font-bold">88/100</Badge>
-            <Progress value={88} className="w-24 h-2" />
-            <span className="text-sm text-muted-foreground">STATUS:</span>
-            <Badge className="bg-green-100 text-green-700 border-0">● STABLE</Badge>
-          </div>
+      <div>
+        <h1 className="text-2xl font-bold text-foreground">Site Head Governance Dashboard</h1>
+        <p className="text-sm text-muted-foreground">
+          Consolidated statistics and evaluation outcomes across manager and HR governance layers.
+        </p>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-6">
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">Total Cases</p>
+          <p className="text-2xl font-bold text-foreground mt-1">{stats?.total_cases ?? 0}</p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" className="gap-2"><Calendar className="h-4 w-4" /> Last 30 Days</Button>
-          <Button className="gap-2"><Download className="h-4 w-4" /> Export Report</Button>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">Pending</p>
+          <p className="text-2xl font-bold text-warning mt-1">{stats?.pending_cases ?? 0}</p>
+        </div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">Resolved</p>
+          <p className="text-2xl font-bold text-success mt-1">{stats?.resolved_cases ?? 0}</p>
+        </div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">Escalated</p>
+          <p className="text-2xl font-bold text-destructive mt-1">{stats?.escalated_cases ?? 0}</p>
+        </div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">High Risk</p>
+          <p className="text-2xl font-bold text-destructive mt-1">{stats?.high_risk_cases ?? 0}</p>
+        </div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">Avg Gov Score</p>
+          <p className="text-2xl font-bold text-foreground mt-1">{Number(stats?.avg_governance_score ?? 0).toFixed(2)}</p>
         </div>
       </div>
 
-      {/* KPI Cards */}
-      <div className="grid grid-cols-6 gap-3">
-        {siteHeadKPIs.map((kpi) => (
-          <Card key={kpi.label}>
-            <CardContent className="pt-4 pb-3 px-4">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{kpi.label}</p>
-              <div className="flex items-end gap-2 mt-1">
-                <span className="text-2xl font-bold text-foreground">{kpi.value}</span>
-                <span className={`text-xs mb-1 ${kpi.changeType === "positive" ? "text-green-600" : "text-destructive"}`}>{kpi.change}</span>
-              </div>
-              <Progress value={typeof kpi.value === "number" ? Math.min(kpi.value * 5, 100) : 94} className="h-1 mt-2" />
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-
-      <div className="grid grid-cols-5 gap-6">
-        {/* Department Performance */}
-        <Card className="col-span-3">
-          <CardHeader className="flex flex-row items-center justify-between">
-            <div>
-              <CardTitle className="text-base">Department-wise Performance</CardTitle>
-              <p className="text-xs text-muted-foreground">Efficiency scores per organizational unit</p>
-            </div>
-            <div className="flex items-center gap-4 text-xs text-muted-foreground">
-              <span className="flex items-center gap-1"><div className="h-2 w-2 rounded-full bg-primary" /> TARGET</span>
-              <span className="flex items-center gap-1"><div className="h-2 w-2 rounded-full bg-primary/40" /> ACTUAL</span>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={250}>
-              <BarChart data={departmentPerformance}>
+      {loading ? (
+        <div className="rounded-lg border border-border bg-card p-5">
+          <p className="text-sm text-muted-foreground">Loading site head analytics...</p>
+        </div>
+      ) : error ? (
+        <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-5">
+          <p className="text-sm text-destructive">{error}</p>
+        </div>
+      ) : (
+        <div className="grid gap-6 lg:grid-cols-2">
+          <div className="rounded-lg border border-border bg-card p-5">
+            <h2 className="font-semibold text-foreground mb-3">HR Recommendation Distribution</h2>
+            <ResponsiveContainer width="100%" height={280}>
+              <BarChart data={recommendationChart}>
                 <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                <XAxis dataKey="department" tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" />
-                <YAxis tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" />
+                <XAxis dataKey="name" tick={{ fontSize: 12 }} stroke="hsl(var(--muted-foreground))" />
+                <YAxis tick={{ fontSize: 12 }} stroke="hsl(var(--muted-foreground))" />
                 <Tooltip />
-                <Bar dataKey="target" fill="hsl(var(--primary) / 0.3)" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="actual" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="value" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
-          </CardContent>
-        </Card>
-
-        {/* Risk Heatmap */}
-        <Card className="col-span-2">
-          <CardHeader>
-            <CardTitle className="text-base">Risk Heatmap</CardTitle>
-            <p className="text-xs text-muted-foreground">Concentration by department</p>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {riskHeatmap.map((r) => (
-              <div key={r.department}>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-sm font-medium text-foreground">{r.department}</span>
-                  <span className={`text-xs font-semibold ${riskLabel(r.label)}`}>{r.label}</span>
-                </div>
-                <div className="w-full bg-muted rounded-full h-2">
-                  <div className={`h-2 rounded-full ${riskColor(r.level)}`} style={{ width: `${r.level}%` }} />
-                </div>
-              </div>
-            ))}
-            <div className="flex items-start gap-2 mt-4 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
-              <AlertTriangle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
-              <div>
-                <p className="text-sm font-semibold text-foreground">Immediate Action Required</p>
-                <p className="text-xs text-muted-foreground">2 cases in Operations reached Threshold 3</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Approval Trend */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
-          <div>
-            <CardTitle className="text-base">Monthly Approval vs Rejection Trend</CardTitle>
-            <p className="text-xs text-muted-foreground">Longitudinal view of executive decision outcomes</p>
           </div>
-          <div className="flex items-center gap-4 text-xs text-muted-foreground">
-            <span className="flex items-center gap-1"><div className="h-0.5 w-4 bg-primary" /> APPROVALS</span>
-            <span className="flex items-center gap-1"><div className="h-0.5 w-4 bg-muted-foreground" /> REJECTIONS</span>
+
+          <div className="rounded-lg border border-border bg-card p-5">
+            <h2 className="font-semibold text-foreground mb-3">AI Risk Level Mix</h2>
+            <ResponsiveContainer width="100%" height={280}>
+              <PieChart>
+                <Pie data={riskDistribution} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={95} label>
+                  {riskDistribution.map((entry, index) => (
+                    <Cell key={`${entry.name}-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
           </div>
-        </CardHeader>
-        <CardContent>
-          <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={approvalTrend}>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-              <XAxis dataKey="month" tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" />
-              <YAxis tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" />
-              <Tooltip />
-              <Area type="monotone" dataKey="approvals" stroke="hsl(var(--primary))" fill="hsl(var(--primary) / 0.1)" strokeWidth={2} />
-              <Area type="monotone" dataKey="rejections" stroke="hsl(var(--muted-foreground))" fill="transparent" strokeWidth={1} strokeDasharray="4 4" />
-            </AreaChart>
-          </ResponsiveContainer>
-        </CardContent>
-      </Card>
+        </div>
+      )}
     </div>
   );
 };

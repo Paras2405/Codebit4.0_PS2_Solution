@@ -11,6 +11,8 @@ import HrLayout from "./components/layout/HrLayout";
 import HrDashboard from "./pages/hr/HrDashboard";
 import HrEmployees from "./pages/hr/HrEmployees";
 import EmployeeDetail from "./pages/hr/EmployeeDetail";
+import HrPerformance from "./pages/hr/HrPerformance";
+import HrGovernanceProcess from "./pages/hr/HrGovernanceProcess";
 import GovernanceAlerts from "./pages/hr/GovernanceAlerts";
 import AuditLogs from "./pages/hr/AuditLogs";
 import HrSettings from "./pages/hr/HrSettings";
@@ -26,7 +28,6 @@ import EmployeeDashboard from "./pages/employee/EmployeeDashboard";
 import MyTasks from "./pages/employee/MyTasks";
 import TaskDetail from "./pages/employee/TaskDetail";
 import Communication from "./pages/employee/Communication";
-import HRUpdates from "./pages/employee/HRUpdates";
 import PerformanceOverview from "./pages/employee/PerformanceOverview";
 import Profile from "./pages/employee/Profile";
 import SiteHeadLayout from "./components/layout/SiteHeadLayout";
@@ -34,7 +35,6 @@ import ExecutiveDashboard from "./pages/sitehead/ExecutiveDashboard";
 import PendingDecisions from "./pages/sitehead/PendingDecisions";
 import EmployeeReview from "./pages/sitehead/EmployeeReview";
 import PerformanceAnalytics from "./pages/sitehead/PerformanceAnalytics";
-import ApprovalHistory from "./pages/sitehead/ApprovalHistory";
 import SiteInsights from "./pages/sitehead/SiteInsights";
 import NotFound from "./pages/NotFound";
 
@@ -56,6 +56,8 @@ const App = () => (
               <Route path="dashboard" element={<HrDashboard />} />
               <Route path="employees" element={<HrEmployees />} />
               <Route path="employees/:id" element={<EmployeeDetail />} />
+              <Route path="performance" element={<HrPerformance />} />
+              <Route path="governance-process" element={<HrGovernanceProcess />} />
               <Route path="governance-alerts" element={<GovernanceAlerts />} />
               <Route path="audit-logs" element={<AuditLogs />} />
               <Route path="settings" element={<HrSettings />} />
@@ -79,7 +81,6 @@ const App = () => (
               <Route path="tasks" element={<MyTasks />} />
               <Route path="tasks/:taskId" element={<TaskDetail />} />
               <Route path="communication" element={<Communication />} />
-              <Route path="hr-updates" element={<HRUpdates />} />
               <Route path="performance" element={<PerformanceOverview />} />
               <Route path="profile" element={<Profile />} />
             </Route>
@@ -91,7 +92,6 @@ const App = () => (
               <Route path="pending" element={<PendingDecisions />} />
               <Route path="review/:employeeId" element={<EmployeeReview />} />
               <Route path="analytics" element={<PerformanceAnalytics />} />
-              <Route path="history" element={<ApprovalHistory />} />
               <Route path="insights" element={<SiteInsights />} />
               <Route path="audit" element={<AuditLogs />} />
             </Route>

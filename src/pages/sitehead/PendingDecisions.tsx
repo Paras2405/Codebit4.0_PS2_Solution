@@ -1,120 +1,183 @@
-import { useState } from "react";
-import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Search, Filter, ClipboardCheck, TrendingUp, AlertTriangle, CheckCircle } from "lucide-react";
-import { pendingEmployees } from "@/data/siteHeadMockData";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { Search } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { API_BASE_URL } from "@/lib/api";
 
-const riskBadge = (level: string) => {
-  const cls = level === "High" ? "bg-destructive text-destructive-foreground" : level === "Medium" ? "bg-amber-100 text-amber-700 border-0" : "bg-green-100 text-green-700 border-0";
-  return <Badge className={`${cls} text-[10px]`}>{level.toUpperCase()}</Badge>;
+type GovernanceCase = {
+  employee_id?: string;
+  employee_name?: string;
+  employee_email?: string | null;
+  ai_analysis?: { risk_level?: string } | null;
+  hr_review?: {
+    hr_recommendation?: string;
+    governance_risk_score?: number;
+    next_step?: string;
+  } | null;
+  site_head_review?: {
+    decision?: string;
+    conflict_detected?: boolean;
+    next_step?: string;
+  } | null;
+  governance_status?: string;
+  updated_at?: string;
 };
 
-const recBadge = (rec: string) => {
-  if (rec === "Highly Recommended") return <Badge className="bg-green-100 text-green-700 border-0 text-[10px] gap-1"><CheckCircle className="h-3 w-3" /> {rec}</Badge>;
-  if (rec === "Not Recommended") return <Badge className="bg-destructive/10 text-destructive border-0 text-[10px] gap-1">✕ {rec}</Badge>;
-  return <Badge variant="outline" className="text-[10px]">{rec}</Badge>;
+type StatsPayload = {
+  total_cases?: number;
+  pending_cases?: number;
+  resolved_cases?: number;
+  escalated_cases?: number;
+  high_risk_cases?: number;
+  avg_governance_score?: number;
 };
 
 const PendingDecisions = () => {
   const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [cases, setCases] = useState<GovernanceCase[]>([]);
+  const [stats, setStats] = useState<StatsPayload | null>(null);
 
-  const filtered = pendingEmployees.filter(e => !search || e.name.toLowerCase().includes(search.toLowerCase()));
+  useEffect(() => {
+    const load = async () => {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const [casesResponse, statsResponse] = await Promise.all([
+          fetch(`${API_BASE_URL}/api/governance/sitehead/cases`),
+          fetch(`${API_BASE_URL}/api/governance/sitehead/stats`),
+        ]);
+
+        const casesPayload = await casesResponse.json().catch(() => ({}));
+        const statsPayload = await statsResponse.json().catch(() => ({}));
+
+        if (!casesResponse.ok) {
+          throw new Error(casesPayload?.error || `Unable to load governance cases. Status ${casesResponse.status}`);
+        }
+
+        if (!statsResponse.ok) {
+          throw new Error(statsPayload?.error || `Unable to load governance stats. Status ${statsResponse.status}`);
+        }
+
+        setCases(Array.isArray(casesPayload?.cases) ? casesPayload.cases : []);
+        setStats(statsPayload || null);
+      } catch (loadError) {
+        setError(loadError instanceof Error ? loadError.message : "Unable to load pending decisions");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    void load();
+  }, []);
+
+  const filteredCases = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) {
+      return cases;
+    }
+
+    return cases.filter((item) => [item.employee_name, item.employee_email, item.employee_id]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .includes(q));
+  }, [cases, search]);
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-foreground">Pending Decisions</h1>
-        <p className="text-muted-foreground text-sm">High-authority overview for Site Head review. Audit AI performance metrics and HR recommendations to finalize employment contracts.</p>
+        <h1 className="text-2xl font-bold text-foreground">Pending Governance Decisions</h1>
+        <p className="text-sm text-muted-foreground">
+          Site-head review queue with manager and HR governance outcomes for each employee.
+        </p>
       </div>
 
-      {/* Filters */}
-      <Card>
-        <CardContent className="flex items-center gap-4 p-4">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <Input placeholder="Search employee name or ID..." className="pl-9" value={search} onChange={(e) => setSearch(e.target.value)} />
-          </div>
-          <Select><SelectTrigger className="w-40"><SelectValue placeholder="Department" /></SelectTrigger><SelectContent><SelectItem value="all">All</SelectItem><SelectItem value="ops">Operations</SelectItem><SelectItem value="eng">Engineering</SelectItem></SelectContent></Select>
-          <Select><SelectTrigger className="w-40"><SelectValue placeholder="HR Rec" /></SelectTrigger><SelectContent><SelectItem value="all">All</SelectItem><SelectItem value="hr">Highly Recommended</SelectItem></SelectContent></Select>
-          <Select><SelectTrigger className="w-40"><SelectValue placeholder="Risk Level" /></SelectTrigger><SelectContent><SelectItem value="all">All</SelectItem><SelectItem value="high">High</SelectItem><SelectItem value="med">Medium</SelectItem></SelectContent></Select>
-          <Button>Apply Filters</Button>
-        </CardContent>
-      </Card>
+      <div className="grid gap-4 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Total Cases</p>
+          <p className="text-2xl font-bold text-foreground mt-1">{stats?.total_cases ?? 0}</p>
+        </div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Pending</p>
+          <p className="text-2xl font-bold text-warning mt-1">{stats?.pending_cases ?? 0}</p>
+        </div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Resolved</p>
+          <p className="text-2xl font-bold text-success mt-1">{stats?.resolved_cases ?? 0}</p>
+        </div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Escalated</p>
+          <p className="text-2xl font-bold text-destructive mt-1">{stats?.escalated_cases ?? 0}</p>
+        </div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">High Risk Cases</p>
+          <p className="text-2xl font-bold text-destructive mt-1">{stats?.high_risk_cases ?? 0}</p>
+        </div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Avg Governance Score</p>
+          <p className="text-2xl font-bold text-foreground mt-1">{Number(stats?.avg_governance_score ?? 0).toFixed(2)}</p>
+        </div>
+      </div>
 
-      {/* Table */}
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>EMPLOYEE NAME</TableHead>
-                <TableHead>DEPARTMENT</TableHead>
-                <TableHead>CONTRACT TYPE</TableHead>
-                <TableHead className="text-center">AI PERF SCORE</TableHead>
-                <TableHead className="text-center">ATTENDANCE %</TableHead>
-                <TableHead>HR RECOMMENDATION</TableHead>
-                <TableHead>RISK LEVEL</TableHead>
-                <TableHead>STATUS</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {filtered.map((emp) => (
-                <TableRow key={emp.id} className="cursor-pointer hover:bg-accent/50">
-                  <TableCell>
-                    <Link to={`/site-head/review/${emp.id}`} className="flex items-center gap-3">
-                      <div className="h-9 w-9 rounded-full bg-primary/10 flex items-center justify-center text-xs font-bold text-primary">{emp.initials}</div>
-                      <span className="font-medium text-foreground">{emp.name}</span>
-                    </Link>
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">{emp.department}</TableCell>
-                  <TableCell className="text-muted-foreground">{emp.contractType}</TableCell>
-                  <TableCell className="text-center">
-                    <Badge variant="outline" className={`${emp.aiScore >= 85 ? "border-green-500 text-green-700" : emp.aiScore >= 70 ? "border-amber-500 text-amber-700" : "border-destructive text-destructive"}`}>{emp.aiScore}%</Badge>
-                  </TableCell>
-                  <TableCell className="text-center text-muted-foreground">{emp.attendance}%</TableCell>
-                  <TableCell>{recBadge(emp.hrRecommendation)}</TableCell>
-                  <TableCell>{riskBadge(emp.riskLevel)}</TableCell>
-                  <TableCell>
-                    <span className={`flex items-center gap-1.5 text-xs ${emp.status === "Pending" ? "text-amber-600" : "text-primary"}`}>
-                      <div className={`h-1.5 w-1.5 rounded-full ${emp.status === "Pending" ? "bg-amber-500" : "bg-primary"}`} />
-                      {emp.status}
-                    </span>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-          <div className="flex items-center justify-between px-6 py-3 border-t text-xs text-muted-foreground">
-            <span>SHOWING {filtered.length} OF 142 RECORDS</span>
-            <span>Page 1 of 29</span>
-          </div>
-        </CardContent>
-      </Card>
+      <div className="rounded-lg border border-border bg-card p-4">
+        <div className="relative max-w-xl">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            className="pl-9"
+            placeholder="Search employee name, email or id..."
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </div>
+      </div>
 
-      {/* Bottom KPIs */}
-      <div className="grid grid-cols-4 gap-4">
-        {[
-          { label: "AWAITING DECISION", value: 42, sub: "HIGH PRIORITY", subColor: "text-destructive", icon: ClipboardCheck },
-          { label: "AVG. PERFORMANCE", value: "84.5%", sub: "ABOVE TARGET", subColor: "text-green-600", icon: TrendingUp },
-          { label: "CRITICAL RISKS", value: 12, sub: "ACTION NEEDED", subColor: "text-destructive", icon: AlertTriangle },
-          { label: "SITE APPROVAL RATE", value: "91%", sub: "SITE: CHICAGO HQ", subColor: "text-primary", icon: CheckCircle },
-        ].map((k) => (
-          <Card key={k.label}>
-            <CardContent className="flex items-start justify-between pt-5">
-              <div>
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{k.label}</p>
-                <p className="text-2xl font-bold text-foreground mt-1">{k.value}</p>
-                <p className={`text-[10px] font-semibold uppercase mt-1 ${k.subColor}`}>{k.sub}</p>
-              </div>
-              <k.icon className="h-5 w-5 text-primary opacity-50" />
-            </CardContent>
-          </Card>
-        ))}
+      <div className="rounded-lg border border-border bg-card overflow-hidden">
+        <table className="w-full">
+          <thead>
+            <tr className="border-b border-border text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+              <th className="px-5 py-3">Employee</th>
+              <th className="px-5 py-3">AI Risk</th>
+              <th className="px-5 py-3">HR Recommendation</th>
+              <th className="px-5 py-3">Governance Score</th>
+              <th className="px-5 py-3">Current Status</th>
+              <th className="px-5 py-3">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr>
+                <td className="px-5 py-6 text-sm text-muted-foreground" colSpan={6}>Loading governance cases...</td>
+              </tr>
+            ) : error ? (
+              <tr>
+                <td className="px-5 py-6 text-sm text-destructive" colSpan={6}>{error}</td>
+              </tr>
+            ) : filteredCases.length === 0 ? (
+              <tr>
+                <td className="px-5 py-6 text-sm text-muted-foreground" colSpan={6}>No matching governance cases found.</td>
+              </tr>
+            ) : filteredCases.map((item) => (
+              <tr key={item.employee_id || item.employee_email} className="border-b border-border last:border-0 hover:bg-muted/30">
+                <td className="px-5 py-4">
+                  <p className="text-sm font-medium text-foreground">{item.employee_name || "Unnamed Employee"}</p>
+                  <p className="text-[10px] text-muted-foreground">{item.employee_email || item.employee_id || "-"}</p>
+                </td>
+                <td className="px-5 py-4 text-sm text-foreground">{item.ai_analysis?.risk_level || "-"}</td>
+                <td className="px-5 py-4 text-sm text-foreground">{item.hr_review?.hr_recommendation || "Pending"}</td>
+                <td className="px-5 py-4 text-sm text-foreground">{Number(item.hr_review?.governance_risk_score ?? 0).toFixed(2)}</td>
+                <td className="px-5 py-4 text-sm text-foreground">{item.governance_status || "PENDING"}</td>
+                <td className="px-5 py-4">
+                  <Link to={`/site-head/review/${item.employee_id || ""}`} className="text-sm font-semibold text-primary hover:underline">
+                    Open Review
+                  </Link>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { Search, X, ChevronLeft, ChevronRight, Users2, FolderPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -237,16 +238,55 @@ const ManagerTeam = () => {
   };
 
   const handleGenerateReport = async (employeeId: string, employeeName: string) => {
-    await logAuditEvent({
-      action: "Manager Report Generated",
-      entity: "Employee",
-      entityId: employeeId,
-      actor: user?.email || user?.name || "Manager",
-      metadata: {
-        employee_name: employeeName,
-        source: "manager/team",
-      },
-    });
+    setError(null);
+    setMessage(null);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/generate-report`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          employeeId,
+        }),
+      });
+
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detailsMessage = [
+          payload?.details?.message,
+          payload?.details?.hint,
+        ]
+          .filter(Boolean)
+          .join(" ");
+
+        throw new Error(
+          detailsMessage
+            ? `${payload?.error || "Unable to generate report"}: ${detailsMessage}`
+            : (payload?.error || `Unable to generate report. Status ${response.status}`),
+        );
+      }
+
+      await logAuditEvent({
+        action: "Manager Report Generated",
+        entity: "Employee",
+        entityId: employeeId,
+        actor: user?.email || user?.name || "Manager",
+        metadata: {
+          employee_name: employeeName,
+          source: "manager/team",
+        },
+      });
+
+      setMessage(
+        payload?.fallback
+          ? `Local report generated for ${employeeName}.`
+          : `Report generation started for ${employeeName}.`,
+      );
+    } catch (generateError) {
+      setError(generateError instanceof Error ? generateError.message : "Unable to generate report");
+    }
   };
 
   const handleCreateTeam = async () => {
@@ -622,7 +662,9 @@ const ManagerTeam = () => {
                       {member.initials}
                     </div>
                     <div>
-                      <p className="text-sm font-medium text-foreground">{member.name}</p>
+                      <Link to={`/manager/employees/${member.id}`} className="text-sm font-medium text-foreground hover:underline">
+                        {member.name}
+                      </Link>
                       <p className="text-[10px] text-muted-foreground">{member.email}</p>
                     </div>
                   </div>

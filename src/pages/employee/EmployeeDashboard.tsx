@@ -1,19 +1,113 @@
+import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ClipboardList, CheckCircle, Clock, BarChart3, Bell } from "lucide-react";
-import { employeeTasks, hrUpdates } from "@/data/employeeMockData";
+import { ClipboardList, CheckCircle, Clock, ScrollText } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { API_BASE_URL } from "@/lib/api";
+
+type EmployeeTask = {
+  id: string;
+  title: string;
+  deadline: string | null;
+  status: "Pending" | "In Progress" | "Completed";
+  updatedAt: string | null;
+};
+
+type PerformanceRecord = {
+  completion_ratio?: number;
+};
+
+type AuditLogRecord = {
+  id: string;
+  timestamp?: string;
+  actor?: string;
+  action?: string;
+};
+
+const normalizeStatus = (value: string): EmployeeTask["status"] => {
+  const status = String(value || "").toLowerCase();
+  if (status === "completed" || status === "complete") return "Completed";
+  if (status === "in progress") return "In Progress";
+  return "Pending";
+};
+
+const formatDate = (value: string | null) => {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+};
+
+const formatDateTime = (value?: string) => {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+};
 
 const EmployeeDashboard = () => {
   const { user } = useAuth();
-  const completed = employeeTasks.filter(t => t.status === "Completed").length;
-  const pending = employeeTasks.filter(t => t.status === "Pending").length;
+  const [tasks, setTasks] = useState<EmployeeTask[]>([]);
+  const [performance, setPerformance] = useState<PerformanceRecord | null>(null);
+  const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const loadDashboard = async () => {
+      if (!user?.email) {
+        setTasks([]);
+        setPerformance(null);
+        setAuditLogs([]);
+        setIsLoading(false);
+        return;
+      }
+
+      setIsLoading(true);
+      try {
+        const [tasksResponse, performanceResponse, logsResponse] = await Promise.all([
+          fetch(`${API_BASE_URL}/api/tasks?assignedToEmail=${encodeURIComponent(user.email)}`),
+          fetch(`${API_BASE_URL}/api/employee-performance/${encodeURIComponent(user.email.toLowerCase())}`),
+          fetch(`${API_BASE_URL}/api/audit-logs?limit=12`),
+        ]);
+
+        const tasksPayload = await tasksResponse.json().catch(() => ({}));
+        const performancePayload = await performanceResponse.json().catch(() => ({}));
+        const logsPayload = await logsResponse.json().catch(() => []);
+
+        const apiTasks = Array.isArray(tasksPayload?.tasks) ? tasksPayload.tasks : [];
+        const normalizedTasks: EmployeeTask[] = apiTasks.map((task: any) => ({
+          id: String(task.id),
+          title: String(task.title || "Untitled task"),
+          deadline: task.deadline || null,
+          status: normalizeStatus(task.managerStatus || task.status || "Pending"),
+          updatedAt: task.updatedAt || task.createdAt || null,
+        }));
+
+        setTasks(normalizedTasks);
+        setPerformance(performancePayload?.performance || null);
+        setAuditLogs(Array.isArray(logsPayload) ? logsPayload.slice(0, 6) : []);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    void loadDashboard();
+  }, [user?.email]);
+
+  const completed = tasks.filter((task) => task.status === "Completed").length;
+  const pending = tasks.filter((task) => task.status === "Pending").length;
+
+  const recentTasks = useMemo(
+    () => [...tasks]
+      .sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())
+      .slice(0, 3),
+    [tasks],
+  );
 
   const kpis = [
-    { label: "Tasks Assigned", value: employeeTasks.length, icon: ClipboardList, color: "text-primary" },
+    { label: "Tasks Assigned", value: tasks.length, icon: ClipboardList, color: "text-primary" },
     { label: "Completed", value: completed, icon: CheckCircle, color: "text-green-600" },
     { label: "Pending", value: pending, icon: Clock, color: "text-amber-500" },
-    { label: "Attendance", value: "96%", icon: BarChart3, color: "text-primary" },
   ];
 
   return (
@@ -29,25 +123,7 @@ const EmployeeDashboard = () => {
         </div>
       </div>
 
-      {/* Performance Score */}
-      <Card className="border bg-gradient-to-r from-primary/5 to-transparent">
-        <CardContent className="flex items-center justify-between p-6">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Overall Performance Score</p>
-            <p className="text-4xl font-bold text-primary mt-1">92</p>
-            <p className="text-sm text-muted-foreground mt-1">Top 5% of Organization</p>
-          </div>
-          <div className="relative h-24 w-24">
-            <svg className="h-24 w-24 -rotate-90" viewBox="0 0 100 100">
-              <circle cx="50" cy="50" r="40" fill="none" stroke="hsl(var(--muted))" strokeWidth="8" />
-              <circle cx="50" cy="50" r="40" fill="none" stroke="hsl(var(--primary))" strokeWidth="8" strokeDasharray={`${92 * 2.51} 251`} strokeLinecap="round" />
-            </svg>
-            <span className="absolute inset-0 flex items-center justify-center text-lg font-bold text-primary">92</span>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-3 gap-4">
         {kpis.map((kpi) => (
           <Card key={kpi.label}>
             <CardContent className="flex items-center justify-between p-5">
@@ -65,11 +141,15 @@ const EmployeeDashboard = () => {
         <Card>
           <CardHeader><CardTitle className="text-base">Recent Task Updates</CardTitle></CardHeader>
           <CardContent className="space-y-3">
-            {employeeTasks.slice(0, 3).map((task) => (
+            {isLoading ? (
+              <p className="text-sm text-muted-foreground">Loading tasks...</p>
+            ) : recentTasks.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No tasks assigned yet.</p>
+            ) : recentTasks.map((task) => (
               <div key={task.id} className="flex items-center justify-between rounded-lg border p-3">
                 <div>
                   <p className="text-sm font-medium text-foreground">{task.title}</p>
-                  <p className="text-xs text-muted-foreground">Due: {task.deadline}</p>
+                  <p className="text-xs text-muted-foreground">Due: {formatDate(task.deadline)}</p>
                 </div>
                 <Badge variant={task.status === "Completed" ? "default" : task.status === "In Progress" ? "secondary" : "outline"} className="text-xs">
                   {task.status}
@@ -81,17 +161,22 @@ const EmployeeDashboard = () => {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
-            <CardTitle className="text-base">Latest HR Announcements</CardTitle>
-            <Bell className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-base">Audit Logs</CardTitle>
+            <ScrollText className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent className="space-y-3">
-            {hrUpdates.slice(0, 3).map((update) => (
-              <div key={update.id} className="rounded-lg border p-3">
+            {isLoading ? (
+              <p className="text-sm text-muted-foreground">Loading audit logs...</p>
+            ) : auditLogs.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No audit logs found.</p>
+            ) : auditLogs.map((log) => (
+              <div key={log.id} className="rounded-lg border p-3">
                 <div className="flex items-center gap-2 mb-1">
-                  {update.important && <Badge className="bg-destructive text-destructive-foreground text-[10px]">Important</Badge>}
-                  <span className="text-xs text-muted-foreground">{update.date}</span>
+                  <Badge variant="outline" className="text-[10px]">Audit</Badge>
+                  <span className="text-xs text-muted-foreground">{formatDateTime(log.timestamp)}</span>
                 </div>
-                <p className="text-sm font-medium text-foreground">{update.title}</p>
+                <p className="text-sm font-medium text-foreground">{log.action || "Unknown action"}</p>
+                <p className="text-xs text-muted-foreground mt-1">Actor: {log.actor || "System"}</p>
               </div>
             ))}
           </CardContent>
